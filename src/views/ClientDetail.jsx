@@ -73,10 +73,16 @@ export default function ClientDetail({
             </div>
 
             {/* KPIs */}
-            <div className="responsive-grid-4" style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 12, marginBottom: 24 }}>
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 12, marginBottom: 12 }}>
                 <StatCard label="Ventas 30 días" value={formatCurrency(client.kpis.ventas30d, client.country)} />
+                <StatCard label="Ventas (unidades)" value={client.kpis.ventasUnidades?.toLocaleString() || "—"} />
                 <StatCard label="Conversión" value={`${client.kpis.conversion}%`} warn={client.kpis.conversion < 5} color={client.kpis.conversion < 5 ? "var(--color-danger)" : "var(--accent-gold)"} />
-                <StatCard label="ACOS" value={client.kpis.acos ? `${client.kpis.acos}%` : "N/A"} warn={client.kpis.acos > 20} color={client.kpis.acos > 20 ? "var(--color-danger)" : "var(--accent-gold)"} />
+                <StatCard label="Visitas" value={client.kpis.visitas?.toLocaleString() || "—"} />
+            </div>
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 12, marginBottom: 24 }}>
+                <StatCard label="Precio Promedio" value={client.kpis.precioPromedio ? formatCurrency(client.kpis.precioPromedio, client.country) : "—"} />
+                <StatCard label="Consideración" value={client.kpis.consideracion ? `${client.kpis.consideracion}%` : "—"} />
+                <StatCard label="Tasa Recompra" value={client.kpis.tasaRecompra ? `${client.kpis.tasaRecompra}%` : "—"} />
                 <StatCard label="Tickets abiertos" value={client.kpis.tickets} warn={client.kpis.tickets > 5} color={client.kpis.tickets > 5 ? "var(--color-danger)" : "var(--accent-gold)"} />
             </div>
 

@@ -53,7 +53,12 @@ function extractKpisFromData(headers, rows) {
     // KPI patterns
     const kpiPatterns = {
         ventas30d: ["venta $", "ventas $", "venta neto", "ventas neto", "gmv", "revenue", "facturaci"],
+        ventasUnidades: ["ventas", "venta"],  // Note: checked AFTER ventas30d (venta $)
         conversion: ["conversión", "conversion", "conv %", "cvr", "tasa de conversión"],
+        visitas: ["visitas", "visita", "visits", "traffic", "tráfico"],
+        precioPromedio: ["precio promedio", "avg price", "precio medio", "ticket promedio"],
+        consideracion: ["consideraci", "consideracion", "consideration"],
+        tasaRecompra: ["recompra", "repurchase", "repeat", "tasa de recompra"],
         acos: ["acos", "costo publicitario", "advertising cost", "tacos"],
         tickets: ["tickets", "ticket", "reclamos", "claims", "mediaciones", "casos abiertos", "disputes"]
     };
@@ -142,7 +147,7 @@ function extractRowBased(headers, rows, kpiPatterns) {
             if (keywords.some(k => cellName.includes(k))) {
                 const val = parseNumericValue(row[dataColHeader]);
                 if (val !== null) {
-                    kpis[kpiKey] = kpiKey === "conversion" || kpiKey === "acos"
+                    kpis[kpiKey] = ["conversion", "acos", "consideracion", "tasaRecompra"].includes(kpiKey)
                         ? Math.round(val * 10) / 10
                         : Math.round(val);
                 }
@@ -545,19 +550,21 @@ export default function ExcelAnalysis({ apiKey, clients, gcalClientId, onUpdateK
                                 <div style={{ fontSize: 12, fontWeight: 600, color: "#27ae60", marginBottom: 6 }}>
                                     📊 KPIs actualizados para {selectedClient?.name}
                                 </div>
-                                <div style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
-                                    {kpiUpdate.ventas30d !== undefined && (
-                                        <span style={kpiBadge}>Ventas: <strong>${kpiUpdate.ventas30d.toLocaleString()}</strong></span>
-                                    )}
-                                    {kpiUpdate.conversion !== undefined && (
-                                        <span style={kpiBadge}>Conversión: <strong>{kpiUpdate.conversion}%</strong></span>
-                                    )}
-                                    {kpiUpdate.acos !== undefined && (
-                                        <span style={kpiBadge}>ACOS: <strong>{kpiUpdate.acos}%</strong></span>
-                                    )}
-                                    {kpiUpdate.tickets !== undefined && (
-                                        <span style={kpiBadge}>Tickets: <strong>{kpiUpdate.tickets}</strong></span>
-                                    )}
+                                <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+                                    {Object.entries(kpiUpdate).map(([key, val]) => {
+                                        const labels = {
+                                            ventas30d: "Venta $", ventasUnidades: "Ventas", conversion: "Conv.",
+                                            visitas: "Visitas", precioPromedio: "Precio Prom.", consideracion: "Consid.",
+                                            tasaRecompra: "Recompra", acos: "ACOS", tickets: "Tickets"
+                                        };
+                                        const isPct = ["conversion", "acos", "consideracion", "tasaRecompra"].includes(key);
+                                        const isMoney = ["ventas30d", "precioPromedio"].includes(key);
+                                        return (
+                                            <span key={key} style={kpiBadge}>
+                                                {labels[key] || key}: <strong>{isMoney ? "$" : ""}{val.toLocaleString()}{isPct ? "%" : ""}</strong>
+                                            </span>
+                                        );
+                                    })}
                                 </div>
                             </div>
                         )}
