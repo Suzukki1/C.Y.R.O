@@ -1,7 +1,8 @@
 import { useState, useRef, useCallback } from "react";
 import { parseExcelFile, getFileSummary } from "../utils/excelParser";
 import { generateExcelAnalysis } from "../services/perplexity";
-import { btnPrimary, btnSecondary, selectStyle } from "../components/Field";
+import { initGoogleSheets, signInGoogleSheets, isGoogleSheetsSignedIn, extractSpreadsheetId, fetchSheetNames, fetchSheetData } from "../services/googleSheets";
+import { btnPrimary, btnSecondary, selectStyle, inputStyle } from "../components/Field";
 import { useLocalStorage } from "../hooks/useLocalStorage";
 
 const MONTHS = ["Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio", "Julio", "Agosto", "Septiembre", "Octubre", "Noviembre", "Diciembre"];
@@ -16,18 +17,73 @@ function getMonthLabel(iso) {
     return `${MONTHS[d.getMonth()]} ${d.getFullYear()}`;
 }
 
-export default function ExcelAnalysis({ apiKey, clients }) {
+/**
+ * Automatically extract KPI values from spreadsheet data.
+ * Scans column headers for known KPI names and aggregates/averages values.
+ */
+function extractKpisFromData(headers, rows) {
+    const kpis = {};
+    const lower = headers.map(h => h.toLowerCase().trim());
+
+    // Map column patterns to KPI keys
+    const patterns = {
+        ventas30d: ["ventas", "venta", "ventas 30", "ventas30d", "sales", "revenue", "facturación", "facturacion", "ingresos", "gmv"],
+        conversion: ["conversión", "conversion", "conv", "cvr", "tasa de conversión", "conversion rate", "conv %", "conv%"],
+        acos: ["acos", "acospercentage", "acos %", "acos%", "costo publicitario", "advertising cost"],
+        tickets: ["tickets", "ticket", "reclamos", "claims", "mediaciones", "casos", "disputes", "tickets abiertos"]
+    };
+
+    for (const [kpiKey, keywords] of Object.entries(patterns)) {
+        const colIdx = lower.findIndex(h => keywords.some(k => h.includes(k)));
+        if (colIdx === -1) continue;
+
+        const values = rows
+            .map(r => {
+                const val = r[headers[colIdx]];
+                if (val == null || val === "") return null;
+                const num = parseFloat(String(val).replace(/[^0-9.,\-]/g, "").replace(",", "."));
+                return isNaN(num) ? null : num;
+            })
+            .filter(v => v !== null);
+
+        if (values.length === 0) continue;
+
+        if (kpiKey === "ventas30d" || kpiKey === "tickets") {
+            // Sum for revenue/tickets
+            kpis[kpiKey] = Math.round(values.reduce((a, b) => a + b, 0));
+        } else {
+            // Average for percentages
+            kpis[kpiKey] = Math.round((values.reduce((a, b) => a + b, 0) / values.length) * 10) / 10;
+        }
+    }
+
+    return Object.keys(kpis).length > 0 ? kpis : null;
+}
+
+export default function ExcelAnalysis({ apiKey, clients, gcalClientId, onUpdateKpis }) {
     // ─── State ───
     const [selectedClientId, setSelectedClientId] = useState("");
-    const [file, setFile] = useState(null);
     const [parsed, setParsed] = useState(null);
     const [error, setError] = useState("");
     const [analysis, setAnalysis] = useState("");
     const [analyzing, setAnalyzing] = useState(false);
     const [aiError, setAiError] = useState("");
-    const [dragging, setDragging] = useState(false);
     const [copied, setCopied] = useState(false);
     const [viewingHistoryItem, setViewingHistoryItem] = useState(null);
+    const [kpiUpdate, setKpiUpdate] = useState(null); // { ventas30d, conversion, etc }
+
+    // Google Sheets state
+    const [gsConnected, setGsConnected] = useState(false);
+    const [gsConnecting, setGsConnecting] = useState(false);
+    const [spreadsheetUrl, setSpreadsheetUrl] = useState("");
+    const [sheetNames, setSheetNames] = useState([]);
+    const [selectedSheet, setSelectedSheet] = useState("");
+    const [gsLoading, setGsLoading] = useState(false);
+    const [dataSource, setDataSource] = useState(""); // "sheets" or "file"
+
+    // File upload state (fallback)
+    const [file, setFile] = useState(null);
+    const [dragging, setDragging] = useState(false);
     const inputRef = useRef(null);
 
     // ─── Persisted history per client ───
@@ -37,7 +93,6 @@ export default function ExcelAnalysis({ apiKey, clients }) {
     const clientHistory = (excelHistory[selectedClientId] || [])
         .sort((a, b) => new Date(b.date) - new Date(a.date));
 
-    // Group history by month
     const historyByMonth = {};
     clientHistory.forEach(item => {
         const label = getMonthLabel(item.date);
@@ -45,52 +100,119 @@ export default function ExcelAnalysis({ apiKey, clients }) {
         historyByMonth[label].push(item);
     });
 
-    // ─── File handling ───
+    // ─── Google Sheets: connect ───
+    const handleConnectSheets = useCallback(async () => {
+        if (!gcalClientId) {
+            setError("Configurá tu Client ID de Google en ⚙️ Integraciones");
+            return;
+        }
+        setGsConnecting(true);
+        setError("");
+        try {
+            await initGoogleSheets(gcalClientId);
+            await signInGoogleSheets();
+            setGsConnected(true);
+        } catch (err) {
+            setError(`Error Google: ${err.message}`);
+        } finally {
+            setGsConnecting(false);
+        }
+    }, [gcalClientId]);
+
+    // ─── Google Sheets: load spreadsheet ───
+    const handleLoadSpreadsheet = useCallback(async () => {
+        setError("");
+        const id = extractSpreadsheetId(spreadsheetUrl);
+        if (!id) {
+            setError("URL o ID de spreadsheet no válido. Pegá el link completo de Google Sheets.");
+            return;
+        }
+        setGsLoading(true);
+        try {
+            const names = await fetchSheetNames(id);
+            setSheetNames(names);
+            setSelectedSheet(names[0] || "");
+        } catch (err) {
+            setError(`Error al cargar spreadsheet: ${err.message}`);
+        } finally {
+            setGsLoading(false);
+        }
+    }, [spreadsheetUrl]);
+
+    // ─── Google Sheets: load sheet data ───
+    const handleLoadSheetData = useCallback(async () => {
+        setError("");
+        const id = extractSpreadsheetId(spreadsheetUrl);
+        if (!id || !selectedSheet) return;
+        setGsLoading(true);
+        try {
+            const data = await fetchSheetData(id, selectedSheet);
+            setParsed(data);
+            setDataSource("sheets");
+            setFile(null);
+            // Auto-extract KPIs
+            if (selectedClientId && onUpdateKpis) {
+                const kpis = extractKpisFromData(data.headers, data.rows);
+                if (kpis) {
+                    onUpdateKpis(selectedClientId, kpis);
+                    setKpiUpdate(kpis);
+                } else {
+                    setKpiUpdate(null);
+                }
+            }
+        } catch (err) {
+            setError(`Error al leer datos: ${err.message}`);
+        } finally {
+            setGsLoading(false);
+        }
+    }, [spreadsheetUrl, selectedSheet, selectedClientId, onUpdateKpis]);
+
+    // ─── File upload (fallback) ───
     const handleFile = useCallback(async (f) => {
         setError("");
         setAnalysis("");
         setAiError("");
         setViewingHistoryItem(null);
-
         const validExts = [".xlsx", ".xls", ".csv"];
         const ext = f.name.substring(f.name.lastIndexOf(".")).toLowerCase();
         if (!validExts.includes(ext)) {
             setError("Formato no soportado. Usá archivos .xlsx, .xls o .csv");
             return;
         }
-
         try {
             const result = await parseExcelFile(f);
             setFile(f);
             setParsed(result);
+            setDataSource("file");
+            // Auto-extract KPIs
+            if (selectedClientId && onUpdateKpis) {
+                const kpis = extractKpisFromData(result.headers, result.rows);
+                if (kpis) {
+                    onUpdateKpis(selectedClientId, kpis);
+                    setKpiUpdate(kpis);
+                } else {
+                    setKpiUpdate(null);
+                }
+            }
         } catch (err) {
             setError(err.message);
         }
-    }, []);
+    }, [selectedClientId, onUpdateKpis]);
 
     const handleDrop = useCallback((e) => {
-        e.preventDefault();
-        setDragging(false);
+        e.preventDefault(); setDragging(false);
         const f = e.dataTransfer?.files?.[0];
         if (f) handleFile(f);
     }, [handleFile]);
 
-    const handleDragOver = useCallback((e) => {
-        e.preventDefault();
-        setDragging(true);
-    }, []);
-
+    const handleDragOver = useCallback((e) => { e.preventDefault(); setDragging(true); }, []);
     const handleDragLeave = useCallback(() => setDragging(false), []);
-
-    const handleInputChange = (e) => {
-        const f = e.target.files?.[0];
-        if (f) handleFile(f);
-    };
+    const handleInputChange = (e) => { const f = e.target.files?.[0]; if (f) handleFile(f); };
 
     // ─── AI Analysis ───
     const handleAnalyze = async () => {
         if (!apiKey) {
-            setAiError("⚙️ Configurá tu API key de Perplexity arriba a la derecha para usar esta función.");
+            setAiError("⚙️ Configurá tu API key de Perplexity en Integraciones.");
             return;
         }
         if (!parsed || !selectedClientId) return;
@@ -101,19 +223,22 @@ export default function ExcelAnalysis({ apiKey, clients }) {
             const clientContext = selectedClient
                 ? `\nCLIENTE: ${selectedClient.name} (${selectedClient.brand})\nPAÍS: ${selectedClient.country}\nCATEGORÍA: ${selectedClient.category}\nNIVEL ML: ${selectedClient.level_ml}\n`
                 : "";
+            const sourceName = dataSource === "sheets"
+                ? `Google Sheets: ${selectedSheet}`
+                : file?.name || "archivo";
 
-            const result = await generateExcelAnalysis(apiKey, clientContext + parsed.rawText, file.name);
+            const result = await generateExcelAnalysis(apiKey, clientContext + parsed.rawText, sourceName);
             setAnalysis(result);
 
-            // Save to history
             const entry = {
                 id: Date.now().toString(),
                 date: new Date().toISOString(),
-                fileName: file.name,
+                fileName: sourceName,
                 rowCount: parsed.rows.length,
                 colCount: parsed.headers.length,
                 headers: parsed.headers,
                 analysis: result,
+                source: dataSource,
             };
             setExcelHistory(prev => ({
                 ...prev,
@@ -133,12 +258,9 @@ export default function ExcelAnalysis({ apiKey, clients }) {
     };
 
     const handleReset = () => {
-        setFile(null);
-        setParsed(null);
-        setError("");
-        setAnalysis("");
-        setAiError("");
-        setViewingHistoryItem(null);
+        setFile(null); setParsed(null); setError(""); setAnalysis("");
+        setAiError(""); setViewingHistoryItem(null); setSheetNames([]);
+        setSelectedSheet(""); setDataSource(""); setKpiUpdate(null);
         if (inputRef.current) inputRef.current.value = "";
     };
 
@@ -150,18 +272,15 @@ export default function ExcelAnalysis({ apiKey, clients }) {
         if (viewingHistoryItem?.id === entryId) setViewingHistoryItem(null);
     };
 
-    const summary = parsed ? getFileSummary(parsed.headers, parsed.rows, parsed.sheetName) : null;
+    const summary = parsed ? { sheetName: parsed.sheetName, totalRows: parsed.rows.length, totalColumns: parsed.headers.length } : null;
 
     return (
         <div className="animate-fade-in">
-            <h1 style={{
-                fontFamily: "var(--font-display)", color: "var(--accent-gold)",
-                fontSize: 28, marginBottom: 4
-            }}>
-                📊 Excel → Análisis IA
+            <h1 style={{ fontFamily: "var(--font-display)", color: "var(--accent-gold)", fontSize: 28, marginBottom: 4 }}>
+                📊 Datos → Análisis IA
             </h1>
             <p style={{ color: "var(--text-dim)", marginBottom: 20, fontSize: 14 }}>
-                Cargá archivos Excel por cliente para hacer un seguimiento mensual con análisis de IA
+                Conectá Google Sheets o cargá un Excel por cliente para análisis mensual con IA
             </p>
 
             {/* ─── Client Selector ─── */}
@@ -175,75 +294,141 @@ export default function ExcelAnalysis({ apiKey, clients }) {
                 }}>Seleccioná un cliente</div>
                 <select
                     value={selectedClientId}
-                    onChange={e => {
-                        setSelectedClientId(e.target.value);
-                        handleReset();
-                    }}
+                    onChange={e => { setSelectedClientId(e.target.value); handleReset(); }}
                     style={{ ...selectStyle, maxWidth: 400 }}
                 >
                     <option value="">— Elegí un cliente —</option>
                     {clients.map(c => (
-                        <option key={c.id} value={c.id}>
-                            {c.name} — {c.category} ({c.country})
-                        </option>
+                        <option key={c.id} value={c.id}>{c.name} — {c.category} ({c.country})</option>
                     ))}
                 </select>
             </div>
 
-            {/* ─── No client selected ─── */}
             {!selectedClientId && (
-                <div style={{
-                    textAlign: "center", padding: "60px 20px", color: "var(--text-faint)", fontSize: 14
-                }}>
-                    👆 Seleccioná un cliente para cargar un Excel y ver el historial de análisis
+                <div style={{ textAlign: "center", padding: "60px 20px", color: "var(--text-faint)", fontSize: 14 }}>
+                    👆 Seleccioná un cliente para conectar datos
                 </div>
             )}
 
             {/* ─── Client selected ─── */}
             {selectedClientId && (
                 <div style={{ display: "grid", gridTemplateColumns: "1fr 320px", gap: 20, alignItems: "start" }}>
-                    {/* Left: Upload + Analysis */}
+                    {/* Left: Data source + Analysis */}
                     <div>
-                        {/* Upload Zone (only when no file loaded) */}
+                        {/* Data source tabs (when no data loaded) */}
                         {!parsed && !viewingHistoryItem && (
-                            <div
-                                onDrop={handleDrop}
-                                onDragOver={handleDragOver}
-                                onDragLeave={handleDragLeave}
-                                onClick={() => inputRef.current?.click()}
-                                style={{
-                                    background: dragging ? "rgba(255,224,102,0.08)" : "var(--bg-card)",
-                                    border: `2px dashed ${dragging ? "var(--accent-gold)" : "var(--border-secondary)"}`,
-                                    borderRadius: "var(--radius-xl)", padding: "50px 40px",
-                                    textAlign: "center", cursor: "pointer",
-                                    transition: "all var(--transition-normal)"
-                                }}
-                            >
-                                <div style={{ fontSize: 40, marginBottom: 12 }}>📁</div>
+                            <div>
+                                {/* Google Sheets connection */}
                                 <div style={{
-                                    fontSize: 15, fontWeight: 600, color: "var(--text-primary)", marginBottom: 6
+                                    background: "var(--bg-card)", borderRadius: "var(--radius-xl)",
+                                    border: "1px solid rgba(66,133,244,0.2)", padding: 20, marginBottom: 16
                                 }}>
-                                    {dragging ? "Soltá el archivo aquí" : `Cargá Excel para ${selectedClient?.name}`}
+                                    <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 14 }}>
+                                        <span style={{ fontSize: 20 }}>📊</span>
+                                        <div>
+                                            <div style={{ fontSize: 14, fontWeight: 600, color: "var(--text-primary)" }}>
+                                                Google Sheets
+                                            </div>
+                                            <div style={{ fontSize: 11, color: "var(--text-muted)" }}>
+                                                Conectá directo a tu spreadsheet
+                                            </div>
+                                        </div>
+                                        {!gsConnected && (
+                                            <button
+                                                style={{ ...btnPrimary, marginLeft: "auto", fontSize: 12, padding: "6px 14px", background: "#4285f4" }}
+                                                onClick={handleConnectSheets}
+                                                disabled={gsConnecting}
+                                            >
+                                                {gsConnecting ? "⏳ Conectando..." : "🔗 Conectar Google"}
+                                            </button>
+                                        )}
+                                        {gsConnected && (
+                                            <span style={{
+                                                marginLeft: "auto", fontSize: 11, color: "#27ae60",
+                                                fontWeight: 600, padding: "4px 10px",
+                                                background: "rgba(39,174,96,0.1)", borderRadius: "var(--radius-pill)"
+                                            }}>✅ Conectado</span>
+                                        )}
+                                    </div>
+
+                                    {gsConnected && (
+                                        <div>
+                                            <div style={{ display: "flex", gap: 8, marginBottom: 10 }}>
+                                                <input
+                                                    type="text"
+                                                    style={{ ...inputStyle, fontSize: 12, flex: 1 }}
+                                                    value={spreadsheetUrl}
+                                                    onChange={e => setSpreadsheetUrl(e.target.value)}
+                                                    placeholder="Pegá la URL del Google Spreadsheet..."
+                                                />
+                                                <button
+                                                    style={{ ...btnPrimary, fontSize: 12, padding: "6px 14px", whiteSpace: "nowrap" }}
+                                                    onClick={handleLoadSpreadsheet}
+                                                    disabled={gsLoading || !spreadsheetUrl}
+                                                >
+                                                    {gsLoading ? "⏳" : "📥 Cargar"}
+                                                </button>
+                                            </div>
+
+                                            {sheetNames.length > 0 && (
+                                                <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                                                    <select
+                                                        style={{ ...selectStyle, fontSize: 12, flex: 1 }}
+                                                        value={selectedSheet}
+                                                        onChange={e => setSelectedSheet(e.target.value)}
+                                                    >
+                                                        {sheetNames.map(n => <option key={n} value={n}>{n}</option>)}
+                                                    </select>
+                                                    <button
+                                                        style={{ ...btnPrimary, fontSize: 12, padding: "6px 14px" }}
+                                                        onClick={handleLoadSheetData}
+                                                        disabled={gsLoading}
+                                                    >
+                                                        {gsLoading ? "⏳" : "📄 Leer datos"}
+                                                    </button>
+                                                </div>
+                                            )}
+                                        </div>
+                                    )}
                                 </div>
-                                <div style={{ fontSize: 12, color: "var(--text-muted)", marginBottom: 16 }}>
-                                    Arrastrá o hacé clic para seleccionar
+
+                                {/* File upload fallback */}
+                                <div style={{
+                                    position: "relative", textAlign: "center",
+                                    color: "var(--text-faint)", fontSize: 11, marginBottom: 16
+                                }}>
+                                    <div style={{
+                                        position: "absolute", top: "50%", left: 0, right: 0,
+                                        borderTop: "1px solid var(--border-primary)"
+                                    }} />
+                                    <span style={{
+                                        position: "relative", background: "var(--bg-primary)",
+                                        padding: "0 12px"
+                                    }}>o subí un archivo</span>
                                 </div>
-                                <div style={{ display: "inline-flex", gap: 6, flexWrap: "wrap", justifyContent: "center" }}>
-                                    {[".xlsx", ".xls", ".csv"].map(ext => (
-                                        <span key={ext} style={{
-                                            padding: "3px 8px", background: "var(--border-primary)",
-                                            borderRadius: "var(--radius-pill)", fontSize: 10,
-                                            color: "var(--text-muted)", fontFamily: "monospace"
-                                        }}>{ext}</span>
-                                    ))}
+
+                                <div
+                                    onDrop={handleDrop}
+                                    onDragOver={handleDragOver}
+                                    onDragLeave={handleDragLeave}
+                                    onClick={() => inputRef.current?.click()}
+                                    style={{
+                                        background: dragging ? "rgba(255,224,102,0.08)" : "var(--bg-card)",
+                                        border: `2px dashed ${dragging ? "var(--accent-gold)" : "var(--border-secondary)"}`,
+                                        borderRadius: "var(--radius-xl)", padding: "30px 20px",
+                                        textAlign: "center", cursor: "pointer",
+                                        transition: "all var(--transition-normal)"
+                                    }}
+                                >
+                                    <div style={{ fontSize: 28, marginBottom: 8 }}>📁</div>
+                                    <div style={{ fontSize: 13, fontWeight: 600, color: "var(--text-primary)", marginBottom: 4 }}>
+                                        {dragging ? "Soltá el archivo aquí" : "Arrastrá un archivo Excel"}
+                                    </div>
+                                    <div style={{ fontSize: 11, color: "var(--text-muted)", marginBottom: 10 }}>
+                                        .xlsx · .xls · .csv
+                                    </div>
+                                    <input ref={inputRef} type="file" accept=".xlsx,.xls,.csv" onChange={handleInputChange} style={{ display: "none" }} />
                                 </div>
-                                <input
-                                    ref={inputRef}
-                                    type="file"
-                                    accept=".xlsx,.xls,.csv"
-                                    onChange={handleInputChange}
-                                    style={{ display: "none" }}
-                                />
                             </div>
                         )}
 
@@ -256,22 +441,48 @@ export default function ExcelAnalysis({ apiKey, clients }) {
                             }}>❌ {error}</div>
                         )}
 
+                        {/* KPI Update Banner */}
+                        {kpiUpdate && (
+                            <div style={{
+                                padding: "12px 16px", background: "rgba(39,174,96,0.08)",
+                                borderRadius: "var(--radius-lg)", border: "1px solid rgba(39,174,96,0.2)",
+                                marginBottom: 14
+                            }}>
+                                <div style={{ fontSize: 12, fontWeight: 600, color: "#27ae60", marginBottom: 6 }}>
+                                    📊 KPIs actualizados para {selectedClient?.name}
+                                </div>
+                                <div style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
+                                    {kpiUpdate.ventas30d !== undefined && (
+                                        <span style={kpiBadge}>Ventas: <strong>${kpiUpdate.ventas30d.toLocaleString()}</strong></span>
+                                    )}
+                                    {kpiUpdate.conversion !== undefined && (
+                                        <span style={kpiBadge}>Conversión: <strong>{kpiUpdate.conversion}%</strong></span>
+                                    )}
+                                    {kpiUpdate.acos !== undefined && (
+                                        <span style={kpiBadge}>ACOS: <strong>{kpiUpdate.acos}%</strong></span>
+                                    )}
+                                    {kpiUpdate.tickets !== undefined && (
+                                        <span style={kpiBadge}>Tickets: <strong>{kpiUpdate.tickets}</strong></span>
+                                    )}
+                                </div>
+                            </div>
+                        )}
+
                         {/* Data Preview */}
                         {parsed && (
                             <div>
-                                {/* File info bar */}
                                 <div style={{
                                     display: "flex", justifyContent: "space-between", alignItems: "center",
                                     marginBottom: 14, flexWrap: "wrap", gap: 10
                                 }}>
                                     <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
                                         <span style={{
-                                            padding: "5px 12px", background: "rgba(255,224,102,0.1)",
-                                            border: "1px solid rgba(255,224,102,0.2)",
+                                            padding: "5px 12px",
+                                            background: dataSource === "sheets" ? "rgba(66,133,244,0.1)" : "rgba(255,224,102,0.1)",
+                                            border: `1px solid ${dataSource === "sheets" ? "rgba(66,133,244,0.2)" : "rgba(255,224,102,0.2)"}`,
                                             borderRadius: "var(--radius-pill)", fontSize: 12,
-                                            color: "var(--accent-gold)", fontWeight: 600
-                                        }}>📄 {file.name}</span>
-                                        <span style={badgeStyle}>{summary.sheetName}</span>
+                                            color: dataSource === "sheets" ? "#4285f4" : "var(--accent-gold)", fontWeight: 600
+                                        }}>{dataSource === "sheets" ? "📊" : "📄"} {dataSource === "sheets" ? selectedSheet : file?.name}</span>
                                         <span style={badgeStyle}>{summary.totalRows} filas · {summary.totalColumns} col</span>
                                     </div>
                                     <div style={{ display: "flex", gap: 8 }}>
@@ -298,10 +509,7 @@ export default function ExcelAnalysis({ apiKey, clients }) {
                                     border: "1px solid var(--border-primary)", overflow: "hidden", marginBottom: 16
                                 }}>
                                     <div style={{ overflowX: "auto", maxHeight: 300 }}>
-                                        <table style={{
-                                            width: "100%", borderCollapse: "collapse", fontSize: 12,
-                                            fontFamily: "var(--font-body)"
-                                        }}>
+                                        <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12, fontFamily: "var(--font-body)" }}>
                                             <thead>
                                                 <tr>
                                                     <th style={{ ...thStyle, background: "var(--bg-tertiary)", color: "var(--accent-gold)", width: 36, textAlign: "center" }}>#</th>
@@ -326,10 +534,7 @@ export default function ExcelAnalysis({ apiKey, clients }) {
                                         </table>
                                     </div>
                                     {parsed.rows.length > 50 && (
-                                        <div style={{
-                                            padding: "6px 16px", background: "var(--bg-tertiary)",
-                                            fontSize: 11, color: "var(--text-dim)", textAlign: "center"
-                                        }}>
+                                        <div style={{ padding: "6px 16px", background: "var(--bg-tertiary)", fontSize: 11, color: "var(--text-dim)", textAlign: "center" }}>
                                             Mostrando 50 de {parsed.rows.length} filas
                                         </div>
                                     )}
@@ -346,7 +551,7 @@ export default function ExcelAnalysis({ apiKey, clients }) {
                             }}>{aiError}</div>
                         )}
 
-                        {/* Analysis Result (new or from history) */}
+                        {/* Analysis Result */}
                         {(analysis || viewingHistoryItem) && (
                             <div style={{
                                 background: "var(--bg-card)", borderRadius: "var(--radius-xl)",
@@ -359,7 +564,7 @@ export default function ExcelAnalysis({ apiKey, clients }) {
                                 }}>
                                     <div>
                                         <h3 style={{ margin: 0, fontSize: 14, color: "var(--accent-gold)" }}>
-                                            🤖 {viewingHistoryItem ? `Análisis — ${viewingHistoryItem.fileName}` : `Análisis — ${file?.name}`}
+                                            🤖 {viewingHistoryItem ? `Análisis — ${viewingHistoryItem.fileName}` : `Análisis — ${dataSource === "sheets" ? selectedSheet : file?.name}`}
                                         </h3>
                                         {viewingHistoryItem && (
                                             <div style={{ fontSize: 11, color: "var(--text-muted)", marginTop: 2 }}>
@@ -368,15 +573,11 @@ export default function ExcelAnalysis({ apiKey, clients }) {
                                         )}
                                     </div>
                                     <div style={{ display: "flex", gap: 6 }}>
-                                        <button
-                                            style={{ ...btnSecondary, fontSize: 11, padding: "4px 10px" }}
+                                        <button style={{ ...btnSecondary, fontSize: 11, padding: "4px 10px" }}
                                             onClick={() => handleCopy(viewingHistoryItem?.analysis)}
-                                        >
-                                            {copied ? "✅" : "📋 Copiar"}
-                                        </button>
+                                        >{copied ? "✅" : "📋 Copiar"}</button>
                                         {viewingHistoryItem && (
-                                            <button
-                                                style={{ ...btnSecondary, fontSize: 11, padding: "4px 10px" }}
+                                            <button style={{ ...btnSecondary, fontSize: 11, padding: "4px 10px" }}
                                                 onClick={() => setViewingHistoryItem(null)}
                                             >✕ Cerrar</button>
                                         )}
@@ -402,20 +603,13 @@ export default function ExcelAnalysis({ apiKey, clients }) {
                             padding: "14px 16px", borderBottom: "1px solid var(--border-primary)",
                             background: "var(--bg-tertiary)"
                         }}>
-                            <h3 style={{ margin: 0, fontSize: 13, color: "var(--accent-gold)" }}>
-                                📅 Historial de cargas
-                            </h3>
-                            <div style={{ fontSize: 11, color: "var(--text-muted)", marginTop: 2 }}>
-                                {selectedClient?.name}
-                            </div>
+                            <h3 style={{ margin: 0, fontSize: 13, color: "var(--accent-gold)" }}>📅 Historial de análisis</h3>
+                            <div style={{ fontSize: 11, color: "var(--text-muted)", marginTop: 2 }}>{selectedClient?.name}</div>
                         </div>
                         <div style={{ maxHeight: 500, overflowY: "auto" }}>
                             {clientHistory.length === 0 && (
-                                <div style={{
-                                    padding: "30px 16px", textAlign: "center",
-                                    color: "var(--text-faint)", fontSize: 12
-                                }}>
-                                    Sin cargas previas.<br />Subí un Excel para comenzar.
+                                <div style={{ padding: "30px 16px", textAlign: "center", color: "var(--text-faint)", fontSize: 12 }}>
+                                    Sin análisis previos.<br />Conectá un spreadsheet para comenzar.
                                 </div>
                             )}
                             {Object.entries(historyByMonth).map(([month, items]) => (
@@ -427,21 +621,19 @@ export default function ExcelAnalysis({ apiKey, clients }) {
                                         borderBottom: "1px solid var(--border-primary)"
                                     }}>{month}</div>
                                     {items.map(item => (
-                                        <div
-                                            key={item.id}
-                                            style={{
-                                                padding: "10px 16px", borderBottom: "1px solid var(--border-primary)",
-                                                cursor: "pointer",
-                                                background: viewingHistoryItem?.id === item.id ? "rgba(255,224,102,0.06)" : "transparent",
-                                                transition: "background var(--transition-fast)"
-                                            }}
+                                        <div key={item.id} style={{
+                                            padding: "10px 16px", borderBottom: "1px solid var(--border-primary)",
+                                            cursor: "pointer",
+                                            background: viewingHistoryItem?.id === item.id ? "rgba(255,224,102,0.06)" : "transparent",
+                                            transition: "background var(--transition-fast)"
+                                        }}
                                             onMouseEnter={e => { if (viewingHistoryItem?.id !== item.id) e.currentTarget.style.background = "rgba(255,255,255,0.02)"; }}
                                             onMouseLeave={e => { if (viewingHistoryItem?.id !== item.id) e.currentTarget.style.background = "transparent"; }}
                                         >
                                             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
                                                 <div onClick={() => { setViewingHistoryItem(item); setAnalysis(""); setParsed(null); setFile(null); }} style={{ flex: 1 }}>
-                                                    <div style={{ fontSize: 12, fontWeight: 600, color: "var(--text-primary)" }}>
-                                                        📄 {item.fileName}
+                                                    <div style={{ fontSize: 12, fontWeight: 600, color: "var(--text-primary)", display: "flex", alignItems: "center", gap: 6 }}>
+                                                        {item.source === "sheets" ? "📊" : "📄"} {item.fileName}
                                                     </div>
                                                     <div style={{ fontSize: 10, color: "var(--text-muted)", marginTop: 2 }}>
                                                         {formatAnalysisDate(item.date)} · {item.rowCount} filas
@@ -471,7 +663,6 @@ export default function ExcelAnalysis({ apiKey, clients }) {
     );
 }
 
-// Table styles
 const thStyle = {
     padding: "8px 12px", textAlign: "left", fontWeight: 600,
     fontSize: 11, textTransform: "uppercase", letterSpacing: 0.5,
@@ -487,4 +678,9 @@ const tdStyle = {
 const badgeStyle = {
     padding: "4px 10px", background: "var(--border-primary)",
     borderRadius: "var(--radius-pill)", fontSize: 11, color: "var(--text-muted)"
+};
+
+const kpiBadge = {
+    padding: "4px 10px", background: "rgba(39,174,96,0.1)",
+    borderRadius: "var(--radius-pill)", fontSize: 11, color: "#27ae60"
 };

@@ -96,6 +96,12 @@ export default function App() {
     setModal(null);
   };
 
+  const updateClientKpis = (clientId, kpis) => {
+    setClients(prev => prev.map(c =>
+      c.id === clientId ? { ...c, kpis: { ...c.kpis, ...kpis } } : c
+    ));
+  };
+
   const saveTask = (t) => {
     const id = t.id || genId("t");
     const task = { ...t, id };
@@ -267,7 +273,7 @@ export default function App() {
           />
         )}
 
-        {view === "excel" && <ExcelAnalysis apiKey={apiKey} clients={clients} />}
+        {view === "excel" && <ExcelAnalysis apiKey={apiKey} clients={clients} gcalClientId={gcalClientId} onUpdateKpis={updateClientKpis} />}
 
         {view === "playbooks" && <Playbooks />}
       </div>
