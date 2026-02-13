@@ -36,7 +36,7 @@ export default function App() {
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [apiKey, setApiKey] = useLocalStorage("cml_perplexity_key", "");
   const [firefliesKey, setFirefliesKey] = useLocalStorage("cml_fireflies_key", "");
-  const [gcalClientId, setGcalClientId] = useLocalStorage("cml_gcal_client_id", "");
+  const gcalClientId = import.meta.env.VITE_GCAL_CLIENT_ID || "";
   const [showApiKey, setShowApiKey] = useState(false);
 
   // ─── Navigation ───
@@ -190,24 +190,8 @@ export default function App() {
                 onChange={e => setFirefliesKey(e.target.value)}
                 placeholder="Fireflies API key..."
               />
-              <div style={{ fontSize: 10, color: "var(--text-dim)", marginBottom: 14 }}>
-                <a href="https://app.fireflies.ai/integrations" target="_blank" rel="noopener" style={{ color: "var(--text-muted)" }}>app.fireflies.ai/integrations</a>
-              </div>
-
-              {/* Google Calendar */}
-              <div style={{
-                fontSize: 11, color: "#4285f4", marginBottom: 6,
-                fontWeight: 600, textTransform: "uppercase", letterSpacing: 1
-              }}>📅 Google Calendar Client ID</div>
-              <input
-                type="password"
-                style={{ ...inputStyle, fontSize: 12, marginBottom: 4 }}
-                value={gcalClientId}
-                onChange={e => setGcalClientId(e.target.value)}
-                placeholder="...apps.googleusercontent.com"
-              />
               <div style={{ fontSize: 10, color: "var(--text-dim)" }}>
-                <a href="https://console.cloud.google.com/apis/credentials" target="_blank" rel="noopener" style={{ color: "var(--text-muted)" }}>console.cloud.google.com</a>
+                <a href="https://app.fireflies.ai/integrations" target="_blank" rel="noopener" style={{ color: "var(--text-muted)" }}>app.fireflies.ai/integrations</a>
               </div>
             </div>
           )}
