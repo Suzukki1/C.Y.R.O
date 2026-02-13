@@ -226,7 +226,7 @@ export default function App() {
           />
         )}
 
-        {view === "excel" && <ExcelAnalysis apiKey={apiKey} />}
+        {view === "excel" && <ExcelAnalysis apiKey={apiKey} clients={clients} />}
 
         {view === "playbooks" && <Playbooks />}
       </div>
