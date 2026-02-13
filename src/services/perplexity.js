@@ -120,3 +120,50 @@ Formato de respuesta: una tarea por línea con el formato:
 
     return callPerplexity(apiKey, systemPrompt, userPrompt);
 }
+
+/**
+ * Generate analysis from Excel account data
+ */
+export async function generateExcelAnalysis(apiKey, rawText, fileName) {
+    const systemPrompt = `Eres un consultor senior experto en MercadoLibre con años de experiencia analizando datos de cuentas de vendedores.
+Tu especialidad es interpretar datos de rendimiento, ventas, publicidad, logística y atención al cliente de MercadoLibre.
+Analizas datos tabulares y generas insights accionables. Responde SIEMPRE en español con recomendaciones concretas y específicas.`;
+
+    const userPrompt = `Analiza los siguientes datos extraídos del archivo "${fileName}" de una cuenta de MercadoLibre:
+
+DATOS:
+${rawText}
+
+Genera un análisis completo con EXACTAMENTE estos apartados:
+📊 RESUMEN DE DATOS: (descripción general de qué información contiene el archivo y métricas clave identificadas)
+🔍 DIAGNÓSTICO: (evaluación del estado actual de la cuenta basándote en los datos)
+🚀 ACCIONES PRIORITARIAS: (top 5 acciones concretas ordenadas por impacto, basadas en los datos)
+📈 OPORTUNIDADES: (oportunidades de crecimiento o mejora detectadas en los datos)
+⚠️ ALERTAS: (problemas, riesgos o métricas preocupantes encontradas en los datos)
+💡 RECOMENDACIONES ADICIONALES: (sugerencias extra basadas en patrones observados)`;
+
+    const response = await fetch(PERPLEXITY_API_URL, {
+        method: "POST",
+        headers: {
+            "Authorization": `Bearer ${apiKey}`,
+            "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+            model: "sonar",
+            messages: [
+                { role: "system", content: systemPrompt },
+                { role: "user", content: userPrompt }
+            ],
+            max_tokens: 2500,
+            temperature: 0.3
+        })
+    });
+
+    if (!response.ok) {
+        const err = await response.text();
+        throw new Error(`Perplexity API error (${response.status}): ${err}`);
+    }
+
+    const data = await response.json();
+    return data.choices?.[0]?.message?.content || "Sin respuesta de la IA.";
+}

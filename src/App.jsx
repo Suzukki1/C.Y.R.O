@@ -20,6 +20,7 @@ import ClientsList from "./views/ClientsList";
 import ClientDetail from "./views/ClientDetail";
 import MeetingsAll from "./views/MeetingsAll";
 import Playbooks from "./views/Playbooks";
+import ExcelAnalysis from "./views/ExcelAnalysis";
 
 import { inputStyle } from "./components/Field";
 
@@ -224,6 +225,8 @@ export default function App() {
             onEditMeeting={(m) => setModal({ type: "editMeeting", data: m })}
           />
         )}
+
+        {view === "excel" && <ExcelAnalysis apiKey={apiKey} />}
 
         {view === "playbooks" && <Playbooks />}
       </div>

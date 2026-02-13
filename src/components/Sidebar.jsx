@@ -4,6 +4,7 @@ const navItems = [
     { id: "dashboard", icon: "◉", label: "Dashboard" },
     { id: "clients", icon: "◈", label: "Clientes" },
     { id: "meetings_all", icon: "◎", label: "Reuniones" },
+    { id: "excel", icon: "◆", label: "Excel → IA" },
     { id: "playbooks", icon: "◇", label: "Playbooks" },
 ];
 
