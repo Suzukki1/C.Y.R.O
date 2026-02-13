@@ -16,44 +16,138 @@ function getMonthLabel(iso) {
     const d = new Date(iso);
     return `${MONTHS[d.getMonth()]} ${d.getFullYear()}`;
 }
+/**
+ * Parse a numeric value from a cell string (handles $, %, dots as thousands, commas as decimal)
+ */
+function parseNumericValue(val) {
+    if (val == null || val === "" || val === "—" || val === "-") return null;
+    const s = String(val).trim();
+    // Remove currency symbols, spaces
+    let clean = s.replace(/[$€\s]/g, "");
+    // Handle percentage
+    const isPct = clean.includes("%");
+    clean = clean.replace(/%/g, "");
+    // Handle Argentine format: 502.829.741 (dots as thousands) and 4,00 (comma as decimal)
+    // If there's a comma and dots, dots are thousands separators
+    if (clean.includes(",") && clean.includes(".")) {
+        clean = clean.replace(/\./g, "").replace(",", ".");
+    } else if (clean.includes(",")) {
+        // Only comma: treat as decimal separator
+        clean = clean.replace(",", ".");
+    }
+    // Remove any remaining non-numeric chars except dot and minus
+    clean = clean.replace(/[^0-9.\-]/g, "");
+    const num = parseFloat(clean);
+    if (isNaN(num)) return null;
+    return isPct ? num : num;
+}
 
 /**
  * Automatically extract KPI values from spreadsheet data.
- * Scans column headers for known KPI names and aggregates/averages values.
+ * Supports two formats:
+ *   1. Column-based: KPI names are column headers, values in rows
+ *   2. Row-based: KPI names are in a "names" column (e.g. NOMBRE VENDEDOR),
+ *      values in a month/data column (e.g. ENERO 2026)
  */
 function extractKpisFromData(headers, rows) {
+    // KPI patterns
+    const kpiPatterns = {
+        ventas30d: ["venta $", "ventas $", "venta neto", "ventas neto", "gmv", "revenue", "facturaci"],
+        conversion: ["conversión", "conversion", "conv %", "cvr", "tasa de conversión"],
+        acos: ["acos", "costo publicitario", "advertising cost", "tacos"],
+        tickets: ["tickets", "ticket", "reclamos", "claims", "mediaciones", "casos abiertos", "disputes"]
+    };
+
+    // ─── Strategy 1: Column-based (headers = KPI names) ───
+    const colKpis = extractColumnBased(headers, rows, kpiPatterns);
+    if (colKpis) return colKpis;
+
+    // ─── Strategy 2: Row-based (rows = KPI names, columns = data) ───
+    return extractRowBased(headers, rows, kpiPatterns);
+}
+
+function extractColumnBased(headers, rows, kpiPatterns) {
     const kpis = {};
     const lower = headers.map(h => h.toLowerCase().trim());
 
-    // Map column patterns to KPI keys
-    const patterns = {
-        ventas30d: ["ventas", "venta", "ventas 30", "ventas30d", "sales", "revenue", "facturación", "facturacion", "ingresos", "gmv"],
-        conversion: ["conversión", "conversion", "conv", "cvr", "tasa de conversión", "conversion rate", "conv %", "conv%"],
-        acos: ["acos", "acospercentage", "acos %", "acos%", "costo publicitario", "advertising cost"],
-        tickets: ["tickets", "ticket", "reclamos", "claims", "mediaciones", "casos", "disputes", "tickets abiertos"]
-    };
-
-    for (const [kpiKey, keywords] of Object.entries(patterns)) {
+    for (const [kpiKey, keywords] of Object.entries(kpiPatterns)) {
         const colIdx = lower.findIndex(h => keywords.some(k => h.includes(k)));
         if (colIdx === -1) continue;
 
         const values = rows
-            .map(r => {
-                const val = r[headers[colIdx]];
-                if (val == null || val === "") return null;
-                const num = parseFloat(String(val).replace(/[^0-9.,\-]/g, "").replace(",", "."));
-                return isNaN(num) ? null : num;
-            })
+            .map(r => parseNumericValue(r[headers[colIdx]]))
             .filter(v => v !== null);
 
         if (values.length === 0) continue;
 
         if (kpiKey === "ventas30d" || kpiKey === "tickets") {
-            // Sum for revenue/tickets
             kpis[kpiKey] = Math.round(values.reduce((a, b) => a + b, 0));
         } else {
-            // Average for percentages
             kpis[kpiKey] = Math.round((values.reduce((a, b) => a + b, 0) / values.length) * 10) / 10;
+        }
+    }
+
+    return Object.keys(kpis).length > 0 ? kpis : null;
+}
+
+function extractRowBased(headers, rows, kpiPatterns) {
+    const lower = headers.map(h => h.toLowerCase().trim());
+
+    // Find the "names" column (NOMBRE VENDEDOR, nombre, métrica, indicador, KPI, etc.)
+    const namesColKeywords = ["nombre", "vendedor", "métrica", "metrica", "indicador", "kpi", "concepto", "item"];
+    const namesColIdx = lower.findIndex(h => namesColKeywords.some(k => h.includes(k)));
+    if (namesColIdx === -1) return null;
+    const namesColHeader = headers[namesColIdx];
+
+    // Find the best data column: prefer latest month, then "objetivo" columns, then first numeric column
+    const monthNames = ["enero", "febrero", "marzo", "abril", "mayo", "junio",
+        "julio", "agosto", "septiembre", "octubre", "noviembre", "diciembre"];
+    const currentMonth = new Date().getMonth(); // 0-indexed
+
+    // Collect month columns with their month index
+    const monthCols = [];
+    lower.forEach((h, i) => {
+        if (i === namesColIdx) return;
+        const mi = monthNames.findIndex(m => h.includes(m));
+        if (mi !== -1) monthCols.push({ idx: i, month: mi, header: headers[i] });
+    });
+
+    // Sort: prefer most recent month that is <= current month, then fallback to any
+    let dataColIdx = -1;
+    if (monthCols.length > 0) {
+        // Pick the latest month <= current month, or the latest overall
+        const pastMonths = monthCols.filter(m => m.month <= currentMonth).sort((a, b) => b.month - a.month);
+        const chosen = pastMonths.length > 0 ? pastMonths[0] : monthCols[monthCols.length - 1];
+        dataColIdx = chosen.idx;
+    }
+
+    // Fallback: look for "objetivo" column
+    if (dataColIdx === -1) {
+        dataColIdx = lower.findIndex(h => h.includes("objetivo"));
+    }
+
+    if (dataColIdx === -1) return null;
+    const dataColHeader = headers[dataColIdx];
+
+    // Scan rows for KPI matches
+    const kpis = {};
+    for (const row of rows) {
+        const cellName = String(row[namesColHeader] || "").toLowerCase().trim()
+            // Remove emojis
+            .replace(/[\u{1F300}-\u{1FAFF}\u{2600}-\u{26FF}]/gu, "").trim();
+        if (!cellName) continue;
+
+        for (const [kpiKey, keywords] of Object.entries(kpiPatterns)) {
+            if (kpis[kpiKey] !== undefined) continue; // already found
+            if (keywords.some(k => cellName.includes(k))) {
+                const val = parseNumericValue(row[dataColHeader]);
+                if (val !== null) {
+                    kpis[kpiKey] = kpiKey === "conversion" || kpiKey === "acos"
+                        ? Math.round(val * 10) / 10
+                        : Math.round(val);
+                }
+                break;
+            }
         }
     }
 
