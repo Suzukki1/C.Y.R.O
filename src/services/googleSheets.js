@@ -144,7 +144,15 @@ export async function fetchSheetData(spreadsheetId, sheetName) {
             throw new Error("La hoja no tiene datos suficientes (necesita al menos header + 1 fila).");
         }
 
-        const headers = values[0];
+        const rawHeaders = values[0];
+        // Deduplicate headers: "Col", "Col" → "Col", "Col (2)"
+        const headerCount = {};
+        const headers = rawHeaders.map(h => {
+            const name = h || "(vacío)";
+            headerCount[name] = (headerCount[name] || 0) + 1;
+            return headerCount[name] > 1 ? `${name} (${headerCount[name]})` : name;
+        });
+
         const rows = values.slice(1).map(row => {
             const obj = {};
             headers.forEach((h, i) => {
