@@ -108,11 +108,22 @@ export function extractSpreadsheetId(urlOrId) {
 export async function fetchSheetNames(spreadsheetId) {
     if (!accessToken) throw new Error("No autenticado con Google.");
 
-    const response = await gapi.client.sheets.spreadsheets.get({
-        spreadsheetId,
-    });
-
-    return response.result.sheets.map(s => s.properties.title);
+    try {
+        const response = await gapi.client.sheets.spreadsheets.get({
+            spreadsheetId,
+        });
+        return response.result.sheets.map(s => s.properties.title);
+    } catch (err) {
+        const status = err?.status || err?.result?.error?.code;
+        const msg = err?.result?.error?.message || err?.message || "Error desconocido";
+        if (status === 403) {
+            throw new Error("Acceso denegado (403). Habilitá la Google Sheets API en console.cloud.google.com/apis/library/sheets.googleapis.com");
+        }
+        if (status === 404) {
+            throw new Error("Spreadsheet no encontrado. Verificá que el link sea correcto y tengas acceso.");
+        }
+        throw new Error(msg);
+    }
 }
 
 /**
@@ -122,34 +133,43 @@ export async function fetchSheetNames(spreadsheetId) {
 export async function fetchSheetData(spreadsheetId, sheetName) {
     if (!accessToken) throw new Error("No autenticado con Google.");
 
-    const response = await gapi.client.sheets.spreadsheets.values.get({
-        spreadsheetId,
-        range: sheetName,
-    });
-
-    const values = response.result.values || [];
-    if (values.length < 2) {
-        throw new Error("La hoja no tiene datos suficientes (necesita al menos header + 1 fila).");
-    }
-
-    const headers = values[0];
-    const rows = values.slice(1).map(row => {
-        const obj = {};
-        headers.forEach((h, i) => {
-            obj[h] = row[i] !== undefined ? row[i] : "";
+    try {
+        const response = await gapi.client.sheets.spreadsheets.values.get({
+            spreadsheetId,
+            range: sheetName,
         });
-        return obj;
-    });
 
-    // Build raw text for AI prompt
-    const rawText = [
-        `Hoja: ${sheetName}`,
-        `Columnas: ${headers.join(", ")}`,
-        `Total filas: ${rows.length}`,
-        "",
-        headers.join("\t"),
-        ...rows.map(r => headers.map(h => r[h]).join("\t"))
-    ].join("\n");
+        const values = response.result.values || [];
+        if (values.length < 2) {
+            throw new Error("La hoja no tiene datos suficientes (necesita al menos header + 1 fila).");
+        }
 
-    return { headers, rows, sheetName, rawText };
+        const headers = values[0];
+        const rows = values.slice(1).map(row => {
+            const obj = {};
+            headers.forEach((h, i) => {
+                obj[h] = row[i] !== undefined ? row[i] : "";
+            });
+            return obj;
+        });
+
+        const rawText = [
+            `Hoja: ${sheetName}`,
+            `Columnas: ${headers.join(", ")}`,
+            `Total filas: ${rows.length}`,
+            "",
+            headers.join("\t"),
+            ...rows.map(r => headers.map(h => r[h]).join("\t"))
+        ].join("\n");
+
+        return { headers, rows, sheetName, rawText };
+    } catch (err) {
+        if (err.message && !err.status) throw err; // re-throw our own errors
+        const status = err?.status || err?.result?.error?.code;
+        const msg = err?.result?.error?.message || err?.message || "Error desconocido";
+        if (status === 403) {
+            throw new Error("Acceso denegado (403). Verificá permisos del spreadsheet.");
+        }
+        throw new Error(msg);
+    }
 }
