@@ -35,6 +35,8 @@ export default function App() {
   const [modal, setModal] = useState(null);
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [apiKey, setApiKey] = useLocalStorage("cml_perplexity_key", "");
+  const [firefliesKey, setFirefliesKey] = useLocalStorage("cml_fireflies_key", "");
+  const [gcalClientId, setGcalClientId] = useLocalStorage("cml_gcal_client_id", "");
   const [showApiKey, setShowApiKey] = useState(false);
 
   // ─── Navigation ───
@@ -149,33 +151,63 @@ export default function App() {
               transition: "all var(--transition-fast)"
             }}
           >
-            {apiKey ? "🟢 Perplexity IA" : "⚙️ Config IA"}
+            {apiKey ? "🟢 Integraciones" : "⚙️ Integraciones"}
           </button>
 
           {showApiKey && (
             <div style={{
               position: "absolute", top: "100%", right: 0, marginTop: 8,
               background: "var(--bg-secondary)", border: "1px solid var(--border-primary)",
-              borderRadius: "var(--radius-lg)", padding: 16, width: 320,
+              borderRadius: "var(--radius-lg)", padding: 16, width: 360,
               boxShadow: "0 12px 40px rgba(0,0,0,0.4)",
               animation: "slideDown 0.2s ease-out"
             }}>
+              {/* Perplexity */}
               <div style={{
-                fontSize: 12, color: "var(--accent-gold)", marginBottom: 8,
+                fontSize: 11, color: "var(--accent-gold)", marginBottom: 6,
                 fontWeight: 600, textTransform: "uppercase", letterSpacing: 1
-              }}>Perplexity API Key</div>
+              }}>🤖 Perplexity API Key</div>
               <input
                 type="password"
-                style={{ ...inputStyle, fontSize: 12 }}
+                style={{ ...inputStyle, fontSize: 12, marginBottom: 4 }}
                 value={apiKey}
                 onChange={e => setApiKey(e.target.value)}
                 placeholder="pplx-..."
               />
-              <div style={{ fontSize: 11, color: "var(--text-dim)", marginTop: 6 }}>
-                Obtené tu key en{" "}
-                <a href="https://www.perplexity.ai/settings/api" target="_blank" rel="noopener">
-                  perplexity.ai/settings/api
-                </a>
+              <div style={{ fontSize: 10, color: "var(--text-dim)", marginBottom: 14 }}>
+                <a href="https://www.perplexity.ai/settings/api" target="_blank" rel="noopener" style={{ color: "var(--text-muted)" }}>perplexity.ai/settings/api</a>
+              </div>
+
+              {/* Fireflies */}
+              <div style={{
+                fontSize: 11, color: "#f39c12", marginBottom: 6,
+                fontWeight: 600, textTransform: "uppercase", letterSpacing: 1
+              }}>🔥 Fireflies API Key</div>
+              <input
+                type="password"
+                style={{ ...inputStyle, fontSize: 12, marginBottom: 4 }}
+                value={firefliesKey}
+                onChange={e => setFirefliesKey(e.target.value)}
+                placeholder="Fireflies API key..."
+              />
+              <div style={{ fontSize: 10, color: "var(--text-dim)", marginBottom: 14 }}>
+                <a href="https://app.fireflies.ai/integrations" target="_blank" rel="noopener" style={{ color: "var(--text-muted)" }}>app.fireflies.ai/integrations</a>
+              </div>
+
+              {/* Google Calendar */}
+              <div style={{
+                fontSize: 11, color: "#4285f4", marginBottom: 6,
+                fontWeight: 600, textTransform: "uppercase", letterSpacing: 1
+              }}>📅 Google Calendar Client ID</div>
+              <input
+                type="password"
+                style={{ ...inputStyle, fontSize: 12, marginBottom: 4 }}
+                value={gcalClientId}
+                onChange={e => setGcalClientId(e.target.value)}
+                placeholder="...apps.googleusercontent.com"
+              />
+              <div style={{ fontSize: 10, color: "var(--text-dim)" }}>
+                <a href="https://console.cloud.google.com/apis/credentials" target="_blank" rel="noopener" style={{ color: "var(--text-muted)" }}>console.cloud.google.com</a>
               </div>
             </div>
           )}
@@ -187,6 +219,7 @@ export default function App() {
             clients={clients} tasks={tasks} meetings={meetings}
             onOpenClient={openClient}
             onNewMeeting={() => setModal("newMeeting")}
+            gcalClientId={gcalClientId}
           />
         )}
 
@@ -223,6 +256,9 @@ export default function App() {
             onOpenClient={openClient}
             onNewMeeting={() => setModal("newMeeting")}
             onEditMeeting={(m) => setModal({ type: "editMeeting", data: m })}
+            firefliesKey={firefliesKey}
+            gcalClientId={gcalClientId}
+            onSaveMeeting={saveMeeting}
           />
         )}
 

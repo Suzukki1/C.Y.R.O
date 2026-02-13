@@ -2,7 +2,7 @@ import StatCard from "../components/StatCard";
 import StatusBadge from "../components/StatusBadge";
 import { priorityColorHex, phaseIcon, formatDateEs, getTodayString } from "../utils/formatters";
 
-export default function Dashboard({ clients, tasks, meetings, onOpenClient, onNewMeeting }) {
+export default function Dashboard({ clients, tasks, meetings, onOpenClient, onNewMeeting, gcalClientId }) {
     const today = getTodayString();
     const highPriority = clients.filter(c => c.priority === "Alta").length;
     const pendingTasks = tasks.filter(t => t.status === "Pendiente" || t.status === "Bloqueada").length;
